@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/gonetz/GLideN64.git
+	branch = master
+	commit = 20a7b75100d240a7a40542edcd404c901e2aa0a7
+	parent = 3bcb5de0d3c2075306f2589fe4097acb584087a7
+	method = rebase
+	cmdver = 0.4.0
