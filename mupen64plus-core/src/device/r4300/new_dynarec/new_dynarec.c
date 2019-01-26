@@ -2318,9 +2318,7 @@ static void invalidate_all_pages(void)
     }
   }
   #if NEW_DYNAREC >= NEW_DYNAREC_ARM
-  #ifndef HAVE_LIBNX
   cache_flush((char *)base_addr_rx,(char *)base_addr_rx+(1<<TARGET_SIZE_2));
-  #endif // HAVE_LIBNX
   #endif
   #ifdef USE_MINI_HT
   memset(g_dev.r4300.new_dynarec_hot_state.mini_ht,-1,sizeof(g_dev.r4300.new_dynarec_hot_state.mini_ht));
@@ -2367,13 +2365,6 @@ void invalidate_cached_code_new_dynarec(struct r4300_core* r4300, uint32_t addre
 // the dirty list to the clean list.
 void clean_blocks(u_int page)
 {
-#ifdef HAVE_LIBNX
-  return; // Causes perf troubles, skip for now
-  bool jit_was_executable = jit_is_executable;
-  if(jit_is_executable)
-    jit_force_writeable();
-#endif
-
   struct ll_entry *head;
   inv_debug("INV: clean_blocks page=%d\n",page);
   head=jump_dirty[page];
@@ -2432,11 +2423,6 @@ void clean_blocks(u_int page)
     }
     head=head->next;
   }
-
-#ifdef HAVE_LIBNX
-  if(jit_was_executable)
-    jit_force_executable();
-#endif
 }
 
 static void emit_extjump(struct ll_entry * head)
@@ -7535,29 +7521,12 @@ void new_dynarec_init(void)
 #define DOUBLE_CACHE_ADDR 3   // Put the dynarec cache at random address with RW address != RX address
 
 // Default to fixed cache address
-#define CACHE_ADDR FIXED_CACHE_ADDR
+#define CACHE_ADDR DOUBLE_CACHE_ADDR
 
 #if CACHE_ADDR==DOUBLE_CACHE_ADDR
-  #include <unistd.h>
-  #include <sys/types.h>
-  #include <fcntl.h>
+  base_addr = mmap((u_char *)g_dev.r4300.extra_memory, 1<<TARGET_SIZE_2, 0,0,0,0);
+  base_addr_rx = jit_rx_addr;
 
-  int fd = shm_open("/new_dynarec", O_RDWR | O_CREAT | O_EXCL, 0600);
-  assert(fd!=-1);
-  shm_unlink("/new_dynarec");
-  ftruncate(fd, 1<<TARGET_SIZE_2);
-  base_addr = mmap((u_char *)g_dev.r4300.extra_memory, 1<<TARGET_SIZE_2,
-                 PROT_READ | PROT_WRITE,
-                 MAP_FIXED | MAP_SHARED, fd, 0);
-
-  assert(base_addr!=(void*)-1);
-
-  base_addr_rx = mmap(NULL, 1<<TARGET_SIZE_2,
-                 PROT_READ | PROT_EXEC,
-                 MAP_SHARED, fd, 0);
-
-  assert(base_addr_rx!=(void*)-1);
-  close(fd);
 #elif CACHE_ADDR==FIXED_CACHE_ADDR
   base_addr = mmap ((u_char *)g_dev.r4300.extra_memory, 1<<TARGET_SIZE_2,
                     PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -7617,13 +7586,7 @@ void new_dynarec_init(void)
   // Copy this into local area so we don't have to put it in every literal pool
   g_dev.r4300.new_dynarec_hot_state.invc_ptr=g_dev.r4300.cached_interp.invalid_code;
 #endif
-
-#ifdef HAVE_LIBNX
-  stop_after_jal=1;
-#else
   stop_after_jal=0;
-#endif // HAVE_LIBNX
-
   // TLB
   using_tlb=0;
   for(n=0;n<524288;n++) // 0 .. 0x7FFFFFFF
@@ -7710,12 +7673,6 @@ int new_recompile_block(int addr)
     DebugMessage(M64MSG_ERROR, "Compile at bogus memory address: %x", (int)addr);
     exit(1);
   }
-
-#ifdef HAVE_LIBNX
-  bool jit_was_executable = jit_is_executable;
-  if(jit_is_executable)
-    jit_force_writeable();
-#endif
 
   /* Pass 1: disassemble */
   /* Pass 2: register dependencies, branch targets */
@@ -10890,9 +10847,7 @@ int new_recompile_block(int addr)
   #if NEW_DYNAREC >= NEW_DYNAREC_ARM
   intptr_t beginning_rx=((intptr_t)beginning-(intptr_t)base_addr)+(intptr_t)base_addr_rx;
   intptr_t out_rx=((intptr_t)out-(intptr_t)base_addr)+(intptr_t)base_addr_rx;
-  #ifndef HAVE_LIBNX
   cache_flush((char *)beginning_rx,(char *)out_rx);
-  #endif // HAVE_LIBNX
   #endif
 
   // If we're within 256K of the end of the buffer,
@@ -10963,11 +10918,7 @@ int new_recompile_block(int addr)
   }
 
   //recompile_end
-#ifdef HAVE_LIBNX
-  if(jit_was_executable)
-    jit_force_executable();
-#endif
-
+  __clear_cache((void*)jit_rx_addr+jit_len-0x1000, (void*)jit_rx_addr+jit_len);
   return 0;
 }
 

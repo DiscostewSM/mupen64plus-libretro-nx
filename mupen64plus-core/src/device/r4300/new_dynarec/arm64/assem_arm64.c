@@ -5090,12 +5090,6 @@ static void arch_init(void) {
   jump_table_symbols[4] = (intptr_t)cached_interp_DDIV;
   jump_table_symbols[5] = (intptr_t)cached_interp_DDIVU;
 
-#ifdef HAVE_LIBNX
-  bool jit_was_executable = jit_is_executable;
-  if(jit_is_executable)
-    jit_force_writeable();
-#endif
-
   // Trampolines for jumps >128MB
   intptr_t *ptr,*ptr2,*ptr3;
   ptr=(intptr_t *)jump_table_symbols;
@@ -5117,11 +5111,6 @@ static void arch_init(void) {
     ptr2++;
     ptr3+=2;
   }
-  
-#ifdef HAVE_LIBNX
-  if(jit_was_executable)
-    jit_force_executable();
-#endif
 
   __clear_cache((char *)base_addr_rx+(1<<TARGET_SIZE_2)-JUMP_TABLE_SIZE,(char *)base_addr_rx+(1<<TARGET_SIZE_2));
 }
