@@ -91,9 +91,9 @@ RETRO_BEGIN_DECLS
 #define glVertexAttribLPointer      rglVertexAttribLPointer
 #define glGetUniformLocation        rglGetUniformLocation
 #define glGenBuffers                rglGenBuffers
-#define glDisable(T)                rglDisable(S##T)
-#define glEnable(T)                 rglEnable(S##T)
-#define glIsEnabled(T)              rglIsEnabled(S##T)
+#define glDisable(T)                rglDisable(T)
+#define glEnable(T)                 rglEnable(T)
+#define glIsEnabled(T)              rglIsEnabled(T)
 #define glUseProgram                rglUseProgram
 #define glDepthMask                 rglDepthMask
 #define glStencilMask               rglStencilMask

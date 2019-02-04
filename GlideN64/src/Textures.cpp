@@ -1468,11 +1468,9 @@ void TextureCache::update(u32 _t)
 			if (m_toggleDumpTex) {
 				displayLoadProgress(L"Texture dump - ON\n");
 				_clear();
-				std::this_thread::sleep_for(std::chrono::seconds(1));
 			}
 			else {
 				displayLoadProgress(L"Texture dump - OFF\n");
-				std::this_thread::sleep_for(std::chrono::seconds(1));
 			}
 		}
 	}

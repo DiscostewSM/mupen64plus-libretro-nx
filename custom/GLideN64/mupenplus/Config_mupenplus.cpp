@@ -8,7 +8,6 @@
 
 #include "../Config.h"
 #include "../GLideN64.h"
-#include "../OpenGL.h"
 #include "../GBI.h"
 #include "../RSP.h"
 #include "../Log.h"
@@ -66,13 +65,7 @@ void LoadCustomSettings(bool internal)
 			case INI_PROPERTY:
 			{
 				if (found) {
-					if (!strcmp(l.name, "video\\cropMode"))
-						config.video.cropMode = atoi(l.value);
-					else if (!strcmp(l.name, "video\\cropWidth"))
-						config.video.cropWidth = atoi(l.value);
-					else if (!strcmp(l.name, "video\\cropHeight"))
-						config.video.cropHeight = atoi(l.value);
-					else if (!strcmp(l.name, "video\\multisampling"))
+					if (!strcmp(l.name, "video\\multisampling"))
 						config.video.multisampling = atoi(l.value);
 					else if (!strcmp(l.name, "frameBufferEmulation\\aspect"))
 						config.frameBufferEmulation.aspect = atoi(l.value);
@@ -113,7 +106,7 @@ void LoadCustomSettings(bool internal)
 	}
 }
 
-extern "C" void Config_LoadConfig()
+void Config_LoadConfig()
 {
 	u32 hacks = config.generalEmulation.hacks;
 	config.resetToDefaults();
@@ -152,7 +145,6 @@ extern "C" void Config_LoadConfig()
 	config.textureFilter.txHiresEnable = txHiresEnable;
 	config.textureFilter.txHiresFullAlphaChannel = txHiresFullAlphaChannel;
 	config.video.multisampling = MultiSampling;
-	config.video.cropMode = CropMode;
 	config.generalEmulation.hacks = hacks;
 	LoadCustomSettings(true);
 	LoadCustomSettings(false);
