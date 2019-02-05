@@ -89,32 +89,6 @@ static void set_jump_target(uintptr_t addr,uintptr_t target)
   }
 }
 
-static void *add_pointer(void *src, void* addr)
-{
-  int *ptr=(int*)src;
-  int *ptr2=(int*)((uintptr_t)ptr+(uintptr_t)*ptr+4);
-  u_char *ptr3=(u_char*)ptr2;
-  assert((*(ptr3+1)&0xFF)==0x8d); //lea
-  assert((*(ptr3+12)&0xFF)==0xe8); //call
-  u_int offset=(uintptr_t)addr-(uintptr_t)ptr-4;
-  *ptr=offset;
-  return (void*)ptr2;
-}
-
-static void *kill_pointer(void *stub)
-{
-  intptr_t ptr=(intptr_t)stub+3;
-  uintptr_t i_ptr=(intptr_t)ptr+*((int *)ptr)+4; // rip relative
-  *((int *)i_ptr)=(intptr_t)stub-(intptr_t)i_ptr-4;
-  return (void *)i_ptr;
-}
-static intptr_t get_pointer(void *stub)
-{
-  intptr_t ptr=(intptr_t)stub+3;
-  uintptr_t i_ptr=(intptr_t)ptr+*((int *)ptr)+4; // rip relative
-  return *((int *)i_ptr)+(intptr_t)i_ptr+4;
-}
-
 /* Register allocation */
 
 // Note: registers are allocated clean (unmodified state)
@@ -2991,21 +2965,9 @@ static void restore_caller_regs(u_int reglist)
 
 /* Stubs/epilogue */
 
-static void emit_extjump2(intptr_t addr, int target, intptr_t linker)
+static void emit_extjump2(struct ll_entry * head, intptr_t linker)
 {
-  u_char *ptr=(u_char *)addr;
-  if(*ptr==0x0f)
-  {
-    assert(ptr[1]>=0x80&&ptr[1]<=0x8f);
-    addr+=2;
-  }
-  else
-  {
-    assert(*ptr==0xe8||*ptr==0xe9);
-    addr++;
-  }
-  emit_lea_rip(addr,ARG1_REG);
-  emit_movimm(target,ARG2_REG);
+  emit_movimm64((intptr_t)head,ARG1_REG);
 //DEBUG >
 #ifdef DEBUG_CYCLE_COUNT
   emit_readword((intptr_t)&g_dev.r4300.new_dynarec_hot_state.last_count,ECX);

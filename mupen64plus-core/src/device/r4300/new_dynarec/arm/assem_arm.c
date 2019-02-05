@@ -57,12 +57,11 @@ void invalidate_addr_r9(void);
 void invalidate_addr_r10(void);
 void invalidate_addr_r12(void);
 
-static void *dyna_linker(void * src, u_int vaddr);
-static void *dyna_linker_ds(void * src, u_int vaddr);
+static void *dyna_linker(struct ll_entry * target);
+static void *dyna_linker_ds(struct ll_entry * target);
 static void invalidate_addr(u_int addr);
 
 static u_int literals[1024][2];
-static unsigned int needs_clear_cache[1<<(TARGET_SIZE_2-17)];
 
 static const u_int jump_vaddr_reg[16] = {
   (int)jump_vaddr_r0,
@@ -308,69 +307,6 @@ static void add_literal(int addr,int val)
   literals[literalcount][0]=addr;
   literals[literalcount][1]=val;
   literalcount++; 
-}
-
-static void *add_pointer(void *src, void* addr)
-{
-  int *ptr=(int*)src;
-  assert((*ptr&0x0f000000)==0x0a000000); //jmp
-  int offset=(int)(((u_int)*ptr+2)<<8)>>6;
-  void *ptr2=(void*)((u_int)ptr+(u_int)offset);
-#ifdef ARMv5_ONLY
-  assert((*(int*)((u_int)ptr2)&0x0ff00000)==0x05900000); //ldr
-  assert((*(int*)((u_int)ptr2+4)&0x0ff00000)==0x05900000); //ldr
-  //assert((*(int*)((u_int)ptr2+8)&0x0f000000)==0x0b000000); //bl
-  //assert((*(int*)((u_int)ptr2+12)&0x0ff00000)==0x01a00000); //mov
-#else
-  assert((*(int*)((u_int)ptr2)&0x0ff00000)==0x03000000); //movw
-  assert((*(int*)((u_int)ptr2+4)&0x0ff00000)==0x03400000); //movt
-  assert((*(int*)((u_int)ptr2+8)&0x0ff00000)==0x03000000); //movw
-  assert((*(int*)((u_int)ptr2+12)&0x0ff00000)==0x03400000); //movt
-  //assert((*(int*)((u_int)ptr2+16)&0x0f000000)==0x0b000000); //bl
-  //assert((*(int*)((u_int)ptr2+20)&0x0ff00000)==0x01a00000); //mov
-#endif
-  *ptr=(*ptr&0xFF000000)|((((u_int)addr-(u_int)ptr-8)<<6)>>8);
-  cache_flush((void*)ptr, (void*)((u_int)ptr+4));
-  return ptr2;
-}
-
-static void *kill_pointer(void *stub)
-{
-#ifdef ARMv5_ONLY
-  int *ptr=(int *)(stub+4);
-  assert((*ptr&0x0ff00000)==0x05900000); //ldr
-  u_int offset=*ptr&0xfff;
-  int **l_ptr=(void *)ptr+offset+8;
-  int *i_ptr=*l_ptr;
-#else
-  int *ptr=(int *)((int)stub+8);
-  int *ptr2=(int *)((int)stub+12);
-  assert((*ptr&0x0ff00000)==0x03000000); //movw
-  assert((*ptr2&0x0ff00000)==0x03400000); //movt
-  int *i_ptr=(int*)((*ptr&0xfff)|((*ptr>>4)&0xf000)|((*ptr2&0xfff)<<16)|((*ptr2&0xf0000)<<12));
-#endif
-  assert((*i_ptr&0x0f000000)==0x0a000000); //jmp
-  set_jump_target((int)i_ptr,(int)stub);
-  return i_ptr;
-}
-
-static int get_pointer(void *stub)
-{
-#ifdef ARMv5_ONLY
-  int *ptr=(int *)(stub+4);
-  assert((*ptr&0x0ff00000)==0x05900000); //ldr
-  u_int offset=*ptr&0xfff;
-  int **l_ptr=(void *)ptr+offset+8;
-  int *i_ptr=*l_ptr;
-#else
-  int *ptr=(int *)((int)stub+8);
-  int *ptr2=(int *)((int)stub+12);
-  assert((*ptr&0x0ff00000)==0x03000000); //movw
-  assert((*ptr2&0x0ff00000)==0x03400000); //movt
-  int *i_ptr=(int*)((*ptr&0xfff)|((*ptr>>4)&0xf000)|((*ptr2&0xfff)<<16)|((*ptr2&0xf0000)<<12));
-#endif
-  assert((*i_ptr&0x0f000000)==0x0a000000); //jmp
-  return (int)i_ptr+((*i_ptr<<8)>>6)+8;
 }
 
 /* Register allocation */
@@ -2594,18 +2530,13 @@ static void literal_pool_jumpover(int n)
   set_jump_target(jaddr,(int)out);
 }
 
-static void emit_extjump2(int addr, int target, int linker)
+static void emit_extjump2(struct ll_entry * head, intptr_t linker)
 {
-  u_char *ptr=(u_char *)addr;
-  assert((ptr[3]&0x0e)==0xa);
 #ifdef ARMv5_ONLY
-    emit_loadlp(target,1);
-    emit_loadlp(addr,0);
+  emit_loadlp((int)head,ARG1_REG);
 #else
-    emit_movw(target&0x0000FFFF,1);
-    emit_movt(target&0xFFFF0000,1);
-    emit_movw(addr&0x0000FFFF,0);
-    emit_movt(addr&0xFFFF0000,0);
+  emit_movw(((u_int)head)&0x0000FFFF,ARG1_REG);
+  emit_movt(((u_int)head)&0xFFFF0000,ARG1_REG);
 #endif
   //assert(addr>=0x7000000&&addr<0x7FFFFFF);
   //assert((target>=0x80000000&&target<0x80800000)||(target>0xA4000000&&target<0xA4001000));
@@ -4491,38 +4422,6 @@ static void wb_invalidate_arm(signed char pre[],signed char entry[],uint64_t dir
 #define wb_invalidate wb_invalidate_arm
 */
 
-// Clearing the cache is rather slow on ARM Linux, so mark the areas
-// that need to be cleared, and then only clear these areas once.
-static void do_clear_cache(void)
-{
-  int i,j;
-  for (i=0;i<(1<<(TARGET_SIZE_2-17));i++)
-  {
-    u_int bitmap=needs_clear_cache[i];
-    if(bitmap) {
-      u_int start,end;
-      for(j=0;j<32;j++) 
-      {
-        if(bitmap&(1<<j)) {
-          start=(int)base_addr+i*131072+j*4096;
-          end=start+4095;
-          j++;
-          while(j<32) {
-            if(bitmap&(1<<j)) {
-              end+=4096;
-              j++;
-            }else{
-              cache_flush((void *)start,(void *)end);
-              break;
-            }
-          }
-        }
-      }
-      needs_clear_cache[i]=0;
-    }
-  }
-}
-
 static void invalidate_addr(u_int addr)
 {
   invalidate_block(addr>>12);
@@ -4567,6 +4466,8 @@ static void arch_init(void) {
     ptr++;
     ptr2++;
   }
+
+  __clear_cache((char *)base_addr+(1<<TARGET_SIZE_2)-JUMP_TABLE_SIZE,(char *)base_addr+(1<<TARGET_SIZE_2));
 
   // Jumping thru the trampolines created above slows things down by about 1%.
   // If part of the cache is beyond the 32M limit, avoid using this area

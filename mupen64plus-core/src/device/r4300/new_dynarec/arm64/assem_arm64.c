@@ -81,12 +81,11 @@ void jump_vaddr_x27(void);
 void jump_vaddr_x28(void);
 void breakpoint(void);
 
-static void *dyna_linker(void * src, u_int vaddr);
-static void *dyna_linker_ds(void * src, u_int vaddr);
+static void *dyna_linker(struct ll_entry * target);
+static void *dyna_linker_ds(struct ll_entry * target);
 static void invalidate_addr(u_int addr);
 
 static uintptr_t literals[1024][2];
-static unsigned int needs_clear_cache[1<<(TARGET_SIZE_2-17)];
 
 static const uintptr_t jump_vaddr_reg[32] = {
   (intptr_t)jump_vaddr_x0,
@@ -324,46 +323,6 @@ static void add_literal(uintptr_t addr,uintptr_t val)
   literals[literalcount][0]=addr;
   literals[literalcount][1]=val;
   literalcount++; 
-}
-
-static void *add_pointer(void *src, void* addr)
-{
-  int *ptr=(int*)src;
-  assert((*ptr&0xFC000000)==0x14000000); //b
-  int offset=((signed int)(*ptr<<6)>>6)<<2;
-  int *ptr2=(int*)((intptr_t)ptr+offset);
-  assert((ptr2[0]&0xFFE00000)==0x52A00000); //movz
-  assert((ptr2[1]&0xFFE00000)==0x72800000); //movk
-  assert((ptr2[2]&0x9f000000)==0x10000000); //adr
-  //assert((ptr2[3]&0xfc000000)==0x94000000); //bl
-  //assert((ptr2[4]&0xfffffc1f)==0xd61f0000); //br
-  set_jump_target((intptr_t)src,(intptr_t)addr);
-  intptr_t ptr_rx=((intptr_t)ptr-(intptr_t)base_addr)+(intptr_t)base_addr_rx;
-  #ifndef HAVE_LIBNX
-  cache_flush((void*)ptr_rx, (void*)(ptr_rx+4));
-  #endif // HAVE_LIBNX
-  return ptr2;
-}
-
-static void *kill_pointer(void *stub)
-{
-  int *ptr=(int *)((intptr_t)stub+8);
-  assert((*ptr&0x9f000000)==0x10000000); //adr
-  int offset=(((signed int)(*ptr<<8)>>13)<<2)|((*ptr>>29)&0x3);
-  int *i_ptr=(int*)((intptr_t)ptr+offset);
-  assert((*i_ptr&0xfc000000)==0x14000000); //b
-  set_jump_target((intptr_t)i_ptr,(intptr_t)stub);
-  return i_ptr;
-}
-
-static intptr_t get_pointer(void *stub)
-{
-  int *ptr=(int *)((intptr_t)stub+8);
-  assert((*ptr&0x9f000000)==0x10000000); //adr
-  int offset=(((signed int)(*ptr<<8)>>13)<<2)|((*ptr>>29)&0x3);
-  int *i_ptr=(int*)((intptr_t)ptr+offset);
-  assert((*i_ptr&0xfc000000)==0x14000000); //b
-  return (intptr_t)i_ptr+(((signed int)(*i_ptr<<6)>>6)<<2);
 }
 
 /* Register allocation */
@@ -3125,17 +3084,20 @@ static void literal_pool_jumpover(int n)
   (void)n;
 }
 
-static void emit_extjump2(intptr_t addr, int target, intptr_t linker)
+static void emit_extjump2(struct ll_entry * head, intptr_t linker)
 {
-  u_char *ptr=(u_char *)addr;
-  assert(((ptr[3]&0xfc)==0x14)||((ptr[3]&0xff)==0x54)); //b or b.cond
+  intptr_t out_rx=((intptr_t)out-(intptr_t)base_addr)+(intptr_t)base_addr_rx;
+  intptr_t offset=(((intptr_t)head&~0xfffLL)-((intptr_t)out_rx&~0xfffLL));
 
-  emit_movz_lsl16(((u_int)target>>16)&0xffff,1);
-  emit_movk((u_int)target&0xffff,1);
-
-  //addr is in the current recompiled block (max 256k)
-  //offset shouldn't exceed +/-1MB 
-  emit_adr(addr,0);
+  if((uintptr_t)head<4294967296LL){
+    emit_movz_lsl16(((uintptr_t)head>>16)&0xffff,ARG1_REG);
+    emit_movk(((uintptr_t)head)&0xffff,ARG1_REG);
+  }else if(offset>=-4294967296LL&&offset<4294967296LL){
+    emit_adrp((intptr_t)head,ARG1_REG);
+    emit_addimm64(ARG1_REG,((intptr_t)head&0xfffLL),ARG1_REG);
+  }else{
+    emit_loadlp((intptr_t)head,ARG1_REG); 
+  }
 
 #ifdef DEBUG_CYCLE_COUNT
   emit_readword((intptr_t)&next_interupt,HOST_TEMPREG);
@@ -3472,15 +3434,14 @@ static intptr_t do_dirty_stub(int i, struct ll_entry * head)
   if((uintptr_t)head<4294967296LL){
     emit_movz_lsl16(((uintptr_t)head>>16)&0xffff,ARG1_REG);
     emit_movk(((uintptr_t)head)&0xffff,ARG1_REG);
-  	}else if(offset>=-4294967296LL&&offset<4294967296LL){
+  }else if(offset>=-4294967296LL&&offset<4294967296LL){
     emit_adrp((intptr_t)head,ARG1_REG);
     emit_addimm64(ARG1_REG,((intptr_t)head&0xfffLL),ARG1_REG);
-    }else{
-      emit_loadlp((intptr_t)head,ARG1_REG); 
+  }else{
+    emit_loadlp((intptr_t)head,ARG1_REG); 
   }
 
   emit_call((intptr_t)verify_code);
-	
   intptr_t entry=(intptr_t)out;
   load_regs_entry(i);
   if(entry==(intptr_t)out) entry=instr_addr[i];
@@ -3497,11 +3458,11 @@ static void do_dirty_stub_ds(struct ll_entry *head)
   if((uintptr_t)head<4294967296LL){
     emit_movz_lsl16(((uintptr_t)head>>16)&0xffff,ARG1_REG);
     emit_movk(((uintptr_t)head)&0xffff,ARG1_REG);
-    }else if(offset>=-4294967296LL&&offset<4294967296LL){
+  }else if(offset>=-4294967296LL&&offset<4294967296LL){
     emit_adrp((intptr_t)head,ARG1_REG);
     emit_addimm64(ARG1_REG,((intptr_t)head&0xfffLL),ARG1_REG);
-    }else{
-      emit_loadlp((intptr_t)head,ARG1_REG);
+  }else{
+    emit_loadlp((intptr_t)head,ARG1_REG);
   }
 
   emit_call((intptr_t)verify_code);
@@ -5104,40 +5065,6 @@ static void do_miniht_insert(u_int return_address,int rt,int temp) {
   emit_writeword(rt,(intptr_t)&g_dev.r4300.new_dynarec_hot_state.mini_ht[(return_address&0x1FF)>>4][0]);
 }
 
-// Clearing the cache is rather slow on ARM Linux, so mark the areas
-// that need to be cleared, and then only clear these areas once.
-static void do_clear_cache(void)
-{
-  int i,j;
-  for (i=0;i<(1<<(TARGET_SIZE_2-17));i++)
-  {
-    u_int bitmap=needs_clear_cache[i];
-    if(bitmap) {
-      uintptr_t start,end;
-      for(j=0;j<32;j++) 
-      {
-        if(bitmap&(1<<j)) {
-          start=(intptr_t)base_addr_rx+i*131072+j*4096;
-          end=start+4095;
-          j++;
-          while(j<32) {
-            if(bitmap&(1<<j)) {
-              end+=4096;
-              j++;
-            }else{
-              #ifndef HAVE_LIBNX
-              cache_flush((char *)start,(char *)end);
-              #endif // HAVE_LIBNX
-              break;
-            }
-          }
-        }
-      }
-      needs_clear_cache[i]=0;
-    }
-  }
-}
-
 static void invalidate_addr(u_int addr)
 {
   invalidate_block(addr>>12);
@@ -5195,4 +5122,6 @@ static void arch_init(void) {
   if(jit_was_executable)
     jit_force_executable();
 #endif
+
+  __clear_cache((char *)base_addr_rx+(1<<TARGET_SIZE_2)-JUMP_TABLE_SIZE,(char *)base_addr_rx+(1<<TARGET_SIZE_2));
 }

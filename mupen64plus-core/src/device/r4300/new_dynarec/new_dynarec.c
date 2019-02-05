@@ -194,6 +194,12 @@ struct ll_entry
   u_int length;
 };
 
+struct ll_link
+{
+  struct ll_entry *entry;
+  struct ll_link *next;
+};
+
 /* linkage */
 void verify_code(void);
 void cc_interrupt(void);
@@ -286,10 +292,11 @@ static char *copy;
 static int expirep;
 static u_int dirty_entry_count;
 static u_int copy_size;
-static struct ll_entry* hash_table[65536][2];
+static struct ll_entry *hash_table[65536][2];
 static struct ll_entry *jump_in[4096];
 static struct ll_entry *jump_dirty[4096];
 static struct ll_entry *jump_out[4096];
+static struct ll_link  *jump_link[4096];
 
 #if COUNT_NOTCOMPILEDS
 static int notcompiledCount = 0;
@@ -1790,6 +1797,16 @@ u_int verify_dirty(struct ll_entry * head)
     return 0;
 }
 
+static void ll_add_link(struct ll_link **head, struct ll_entry *entry)
+{
+  struct ll_link *new_entry;
+  new_entry=(struct ll_link *)malloc(sizeof(struct ll_link));
+  assert(new_entry!=NULL);
+  new_entry->entry=entry;
+  new_entry->next=*head;
+  *head=new_entry;
+}
+
 // Add virtual address mapping for 32-bit compiled block
 static struct ll_entry *ll_add_32(struct ll_entry **head,int vaddr,u_int reg32,void *addr,void *clean_addr,u_int start,void *copy,u_int length)
 {
@@ -1823,8 +1840,7 @@ static void ll_remove_matching_addrs(struct ll_entry **head,intptr_t addr,int sh
     if((((uintptr_t)((*cur)->addr)-(uintptr_t)base_addr)>>shift)==((addr-(uintptr_t)base_addr)>>shift) ||
        (((uintptr_t)((*cur)->addr)-(uintptr_t)base_addr-MAX_OUTPUT_BLOCK_SIZE)>>shift)==((addr-(uintptr_t)base_addr)>>shift))
     {
-      if((*cur)->addr!=(*cur)->clean_addr){ //jump_dirty
-        assert(head>=jump_dirty&&head<(jump_dirty+4096));
+      if(head>=jump_dirty&&head<(jump_dirty+4096)){
         u_int length=(*cur)->length;
         u_int* ptr=(u_int*)(*cur)->copy;
         ptr[length>>2]--;
@@ -1854,8 +1870,7 @@ static void ll_clear(struct ll_entry **head)
   if((cur=*head)) {
     *head=0;
     while(cur) {
-      if(cur->addr!=cur->clean_addr){ //jump_dirty
-        assert(head>=jump_dirty&&head<(jump_dirty+4096));
+      if(head>=jump_dirty&&head<(jump_dirty+4096)){
         u_int length=cur->length;
         u_int* ptr=(u_int*)cur->copy;
         ptr[length>>2]--;
@@ -1871,38 +1886,57 @@ static void ll_clear(struct ll_entry **head)
   }
 }
 
-// Dereference the pointers and remove if it matches
-static void ll_kill_pointers(struct ll_entry *head,intptr_t addr,int shift)
+static void ll_clear_link(struct ll_link **head)
 {
-  while(head) {
-    uintptr_t ptr=get_pointer(head->addr);
-    inv_debug("EXP: Lookup pointer to %x at %x (%x)\n",(intptr_t)ptr,(intptr_t)head->addr,head->vaddr);
-    if((((ptr-(uintptr_t)base_addr)>>shift)==((addr-(uintptr_t)base_addr)>>shift)) ||
-       (((ptr-(uintptr_t)base_addr-MAX_OUTPUT_BLOCK_SIZE)>>shift)==((addr-(uintptr_t)base_addr)>>shift)))
-    {
-      inv_debug("EXP: Kill pointer at %x (%x)\n",(intptr_t)head->addr,head->vaddr);
-      uintptr_t host_addr=(intptr_t)kill_pointer(head->addr);
-      #if NEW_DYNAREC >= NEW_DYNAREC_ARM
-        needs_clear_cache[(host_addr-(uintptr_t)base_addr)>>17]|=1<<(((host_addr-(uintptr_t)base_addr)>>12)&31);
-      #else
-        /* avoid unused variable warning */
-        (void)host_addr;
-      #endif
+  struct ll_link *cur;
+  struct ll_link *next;
+  if((cur=*head)) {
+    *head=0;
+    while(cur) {
+      next=cur->next;
+      free(cur);
+      cur=next;
     }
-    head=head->next;
   }
 }
 
-// Add an entry to jump_out after making a link
-static void add_link(u_int vaddr,void *src)
+static void ll_kill_link(struct ll_link **head,intptr_t addr,int shift)
+{
+  struct ll_link **cur=head;
+  struct ll_link *next;
+  while(*cur) {
+    assert((*cur)->entry);
+    if((((uintptr_t)((*cur)->entry->clean_addr)-(uintptr_t)base_addr)>>shift)==((addr-(uintptr_t)base_addr)>>shift) ||
+       (((uintptr_t)((*cur)->entry->clean_addr)-(uintptr_t)base_addr-MAX_OUTPUT_BLOCK_SIZE)>>shift)==((addr-(uintptr_t)base_addr)>>shift))
+    {
+      (*cur)->entry->clean_addr=NULL;
+      next=(*cur)->next;
+      free(*cur);
+      *cur=next;
+    }
+    else
+    {
+      cur=&((*cur)->next);
+    }
+  }
+}
+
+// Add an entry to jump_out
+static struct ll_entry * add_jump_out(u_int vaddr,void *stub,void *target)
 {
   u_int page=(vaddr^0x80000000)>>12;
   if(page>262143&&g_dev.r4300.cp0.tlb.LUT_r[vaddr>>12]) page=(g_dev.r4300.cp0.tlb.LUT_r[vaddr>>12]^0x80000000)>>12;
   if(page>4095) page=2048+(page&2047);
-  inv_debug("add_link: %x -> %x (%d)\n",(intptr_t)src,vaddr,page);
-  (void)ll_add(jump_out+page,vaddr,src,src,0,NULL,0);
-  //int ptr=get_pointer(src);
-  //inv_debug("add_link: Pointer is to %x\n",(intptr_t)ptr);
+  return ll_add(jump_out+page,vaddr,stub,target,0,NULL,0);
+}
+
+static void add_link(u_int vaddr,struct ll_entry *head)
+{
+  assert(head->clean_addr!=NULL);
+  u_int page=(vaddr^0x80000000)>>12;
+  if(page>262143&&g_dev.r4300.cp0.tlb.LUT_r[vaddr>>12]) page=(g_dev.r4300.cp0.tlb.LUT_r[vaddr>>12]^0x80000000)>>12;
+  if(page>4095) page=2048+(page&2047);
+  ll_add_link(jump_link+page,head);
 }
 
 static struct ll_entry *get_clean(struct r4300_core* r4300,u_int vaddr,u_int flags)
@@ -1956,45 +1990,29 @@ static struct ll_entry *get_dirty(struct r4300_core* r4300,u_int vaddr,u_int fla
   return NULL;
 }
 
-static void *dyna_linker(void * src, u_int vaddr)
+static void *dyna_linker(struct ll_entry * target)
 {
-  assert((vaddr&1)==0);
+  assert((target->vaddr&1)==0);
   struct r4300_core* r4300 = &g_dev.r4300;
   struct ll_entry *head;
 
-#ifndef DISABLE_BLOCK_LINKING
-  head=get_clean(r4300,vaddr,~0);
+  if(target->clean_addr!=NULL)
+    return (void*)(((intptr_t)target->clean_addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
+
+  head=get_clean(r4300,target->vaddr,~0);
   if(head!=NULL){
-    void* src_rw=(void*)(((intptr_t)src-(intptr_t)base_addr_rx)+(intptr_t)base_addr);
-#if NEW_DYNAREC == NEW_DYNAREC_ARM64
-    //TODO: Avoid disabling link between blocks for conditional branches
-    int *ptr=(int*)src_rw;
-    if((*ptr&0xfc000000)==0x14000000) { //b
-      add_link(vaddr, add_pointer(src_rw,head->addr));
-    }
-#else
-    add_link(vaddr, add_pointer(src_rw,head->addr));
-#endif
+    target->clean_addr=head->clean_addr;
+    add_link(target->vaddr,target);
     return (void*)(((intptr_t)head->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
   }
-#endif
 
-  struct ll_entry **ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
-  if(ht_bin[0]&&ht_bin[0]->vaddr==vaddr) return (void *)(((intptr_t)ht_bin[0]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
-  if(ht_bin[1]&&ht_bin[1]->vaddr==vaddr) return (void *)(((intptr_t)ht_bin[1]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
+  struct ll_entry **ht_bin=hash_table[((target->vaddr>>16)^target->vaddr)&0xFFFF];
+  if(ht_bin[0]&&ht_bin[0]->vaddr==target->vaddr) return (void *)(((intptr_t)ht_bin[0]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
+  if(ht_bin[1]&&ht_bin[1]->vaddr==target->vaddr) return (void *)(((intptr_t)ht_bin[1]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
 
-#ifdef DISABLE_BLOCK_LINKING
-  head=get_clean(r4300,vaddr,~0);
+  head=get_dirty(r4300,target->vaddr,~0);
   if(head!=NULL){
-    ht_bin[1]=ht_bin[0];
-    ht_bin[0]=head;
-    return (void*)(((intptr_t)head->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
-  }
-#endif
-
-  head=get_dirty(r4300,vaddr,~0);
-  if(head!=NULL){
-    if(ht_bin[0]&&ht_bin[0]->vaddr==vaddr) {
+    if(ht_bin[0]&&ht_bin[0]->vaddr==target->vaddr) {
       ht_bin[0]=head; // Replace existing entry
     }
     else
@@ -2005,54 +2023,38 @@ static void *dyna_linker(void * src, u_int vaddr)
     return (void*)(((intptr_t)head->clean_addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
   }
 
-  int r=new_recompile_block(vaddr);
-  if(r==0) return dyna_linker(src,vaddr);
+  int r=new_recompile_block(target->vaddr);
+  if(r==0) return dyna_linker(target);
   // Execute in unmapped page, generate pagefault execption
-  assert(r4300->cp0.tlb.LUT_r[(vaddr&~1) >> 12] == 0);
-  assert((intptr_t)r4300->new_dynarec_hot_state.memory_map[(vaddr&~1) >> 12] < 0);
-  r4300->delay_slot = vaddr&1;
-  TLB_refill_exception(r4300, vaddr&~1, 2);
+  assert(r4300->cp0.tlb.LUT_r[(target->vaddr&~1) >> 12] == 0);
+  assert((intptr_t)r4300->new_dynarec_hot_state.memory_map[(target->vaddr&~1) >> 12] < 0);
+  r4300->delay_slot = target->vaddr&1;
+  TLB_refill_exception(r4300, target->vaddr&~1, 2);
   return get_addr_ht(r4300->new_dynarec_hot_state.pcaddr);
 }
 
-static void *dyna_linker_ds(void * src, u_int vaddr)
+static void *dyna_linker_ds(struct ll_entry * target)
 {
   struct r4300_core* r4300 = &g_dev.r4300;
   struct ll_entry *head;
 
-#ifndef DISABLE_BLOCK_LINKING
-  head=get_clean(r4300,vaddr,~0);
+  if(target->clean_addr!=NULL)
+    return (void*)(((intptr_t)target->clean_addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
+
+  head=get_clean(r4300,target->vaddr,~0);
   if(head!=NULL){
-    void* src_rw=(void*)(((intptr_t)src-(intptr_t)base_addr_rx)+(intptr_t)base_addr);
-#if NEW_DYNAREC == NEW_DYNAREC_ARM64
-    //TODO: Avoid disabling link between blocks for conditional branches
-    int *ptr=(int*)src_rw;
-    if((*ptr&0xfc000000)==0x14000000) { //b
-      add_link(vaddr, add_pointer(src_rw,head->addr));
-    }
-#else
-    add_link(vaddr, add_pointer(src_rw,head->addr));
-#endif
+    target->clean_addr=head->clean_addr;
+    add_link(target->vaddr,target);
     return (void*)(((intptr_t)head->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
   }
-#endif
 
-  struct ll_entry **ht_bin=hash_table[((vaddr>>16)^vaddr)&0xFFFF];
-  if(ht_bin[0]&&ht_bin[0]->vaddr==vaddr) return (void *)(((intptr_t)ht_bin[0]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
-  if(ht_bin[1]&&ht_bin[1]->vaddr==vaddr) return (void *)(((intptr_t)ht_bin[1]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
+  struct ll_entry **ht_bin=hash_table[((target->vaddr>>16)^target->vaddr)&0xFFFF];
+  if(ht_bin[0]&&ht_bin[0]->vaddr==target->vaddr) return (void *)(((intptr_t)ht_bin[0]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
+  if(ht_bin[1]&&ht_bin[1]->vaddr==target->vaddr) return (void *)(((intptr_t)ht_bin[1]->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
 
-#ifdef DISABLE_BLOCK_LINKING
-  head=get_clean(r4300,vaddr,~0);
+  head=get_dirty(r4300,target->vaddr,~0);
   if(head!=NULL){
-    ht_bin[1]=ht_bin[0];
-    ht_bin[0]=head;
-    return (void*)(((intptr_t)head->addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
-  }
-#endif
-
-  head=get_dirty(r4300,vaddr,~0);
-  if(head!=NULL){
-    if(ht_bin[0]&&ht_bin[0]->vaddr==vaddr) {
+    if(ht_bin[0]&&ht_bin[0]->vaddr==target->vaddr) {
       ht_bin[0]=head; // Replace existing entry
     }
     else
@@ -2063,13 +2065,13 @@ static void *dyna_linker_ds(void * src, u_int vaddr)
     return (void*)(((intptr_t)head->clean_addr-(intptr_t)base_addr)+(intptr_t)base_addr_rx);
   }
 
-  int r=new_recompile_block((vaddr&0xFFFFFFF8)+1);
-  if(r==0) return dyna_linker_ds(src,vaddr);
+  int r=new_recompile_block((target->vaddr&0xFFFFFFF8)+1);
+  if(r==0) return dyna_linker_ds(target);
   // Execute in unmapped page, generate pagefault execption
-  assert(r4300->cp0.tlb.LUT_r[(vaddr&~1) >> 12] == 0);
-  assert((intptr_t)r4300->new_dynarec_hot_state.memory_map[(vaddr&~1) >> 12] < 0);
-  r4300->delay_slot = vaddr&1;
-  TLB_refill_exception(r4300, vaddr&~1, 2);
+  assert(r4300->cp0.tlb.LUT_r[(target->vaddr&~1) >> 12] == 0);
+  assert((intptr_t)r4300->new_dynarec_hot_state.memory_map[(target->vaddr&~1) >> 12] < 0);
+  r4300->delay_slot = target->vaddr&1;
+  TLB_refill_exception(r4300, target->vaddr&~1, 2);
   return get_addr_ht(r4300->new_dynarec_hot_state.pcaddr);
 }
 
@@ -2217,23 +2219,17 @@ static void invalidate_page(u_int page)
     free(head);
     head=next;
   }
-#ifndef HAVE_LIBNX // Skip kill pointer
-  head=jump_out[page];
-  jump_out[page]=0;
-  while(head!=NULL) {
-    inv_debug("INVALIDATE: kill pointer to %x (%x)\n",head->vaddr,(intptr_t)head->addr);
-      uintptr_t host_addr=(intptr_t)kill_pointer(head->addr);
-    #if NEW_DYNAREC >= NEW_DYNAREC_ARM
-      needs_clear_cache[(host_addr-(uintptr_t)base_addr)>>17]|=1<<(((host_addr-(uintptr_t)base_addr)>>12)&31);
-    #else
-      /* avoid unused variable warning */
-      (void)host_addr;
-    #endif
-    next=head->next;
-    free(head);
-    head=next;
+  struct ll_link *link_head;
+  struct ll_link *link_next;
+  link_head=jump_link[page];
+  jump_link[page]=0;
+  while(link_head!=NULL) {
+    assert(link_head->entry);
+    link_head->entry->clean_addr=NULL;
+    link_next=link_head->next;
+    free(link_head);
+    link_head=link_next;
   }
-#endif // HAVE_LIBNX
 }
 void invalidate_block(u_int block)
 {
@@ -2290,9 +2286,6 @@ void invalidate_block(u_int block)
   for(first=page+1;first<last;first++) {
     invalidate_page(first);
   }
-  #if NEW_DYNAREC >= NEW_DYNAREC_ARM
-    do_clear_cache();
-  #endif
   
   // Don't trap writes
   g_dev.r4300.cached_interp.invalid_code[block]=1;
@@ -2446,13 +2439,13 @@ void clean_blocks(u_int page)
 #endif
 }
 
-static void emit_extjump(intptr_t addr, int target)
+static void emit_extjump(struct ll_entry * head)
 {
-  emit_extjump2(addr, target, (intptr_t)dyna_linker);
+  emit_extjump2(head, (intptr_t)dyna_linker);
 }
-static void emit_extjump_ds(intptr_t addr, int target)
+static void emit_extjump_ds(struct ll_entry * head)
 {
-  emit_extjump2(addr, target, (intptr_t)dyna_linker_ds);
+  emit_extjump2(head, (intptr_t)dyna_linker_ds);
 }
 
 static void mov_alloc(struct regstat *current,int i)
@@ -7328,15 +7321,11 @@ static void pagespan_assemble(int i,struct regstat *i_regs)
   int target_addr=start+i*4+5;
   void *stub=out;
   void *compiled_target_addr=check_addr(target_addr);
-  emit_extjump_ds((intptr_t)branch_addr,target_addr);
-#ifndef DISABLE_BLOCK_LINKING
-  if(compiled_target_addr) {
-    set_jump_target((intptr_t)branch_addr,(intptr_t)compiled_target_addr);
-    add_link(target_addr,stub);
-  }
-  else
-#endif
-    set_jump_target((intptr_t)branch_addr,(intptr_t)stub);
+  struct ll_entry * head=add_jump_out(target_addr,stub,compiled_target_addr);
+  if(compiled_target_addr)
+    add_link(target_addr,head);
+  emit_extjump_ds(head);
+  set_jump_target((intptr_t)branch_addr,(intptr_t)stub);
   if(likely[i]) {
     // Not-taken path
     set_jump_target((intptr_t)nottaken,(intptr_t)out);
@@ -7346,15 +7335,11 @@ static void pagespan_assemble(int i,struct regstat *i_regs)
     int target_addr=start+i*4+8;
     void *stub=out;
     void *compiled_target_addr=check_addr(target_addr);
-    emit_extjump_ds((intptr_t)branch_addr,target_addr);
-#ifndef DISABLE_BLOCK_LINKING
-    if(compiled_target_addr) {
-      set_jump_target((intptr_t)branch_addr,(intptr_t)compiled_target_addr);
-      add_link(target_addr,stub);
-    }
-    else
-#endif
-      set_jump_target((intptr_t)branch_addr,(intptr_t)stub);
+    struct ll_entry * head=add_jump_out(target_addr,stub,compiled_target_addr);
+    if(compiled_target_addr)
+      add_link(target_addr,head);
+    emit_extjump_ds(head);
+    set_jump_target((intptr_t)branch_addr,(intptr_t)stub);
   }
 }
 
@@ -7662,6 +7647,7 @@ void new_dynarec_cleanup(void)
   for(n=0;n<4096;n++) ll_clear(jump_in+n);
   for(n=0;n<4096;n++) ll_clear(jump_out+n);
   for(n=0;n<4096;n++) ll_clear(jump_dirty+n);
+  for(n=0;n<4096;n++) ll_clear_link(jump_link+n);
   assert(copy_size==0);
 #if !defined(RECOMP_DBG)
 #if defined(WIN32)
@@ -10812,21 +10798,11 @@ int new_recompile_block(int addr)
     {
       void *stub=out;
       void *addr=check_addr(link_addr[i][1]);
-      emit_extjump(link_addr[i][0],link_addr[i][1]);
-#ifndef DISABLE_BLOCK_LINKING
-#if NEW_DYNAREC==NEW_DYNAREC_ARM64
-      //TODO: Avoid disabling link between blocks for conditional branches
-      u_char *ptr=(u_char *)link_addr[i][0];
-      if(addr&&((ptr[3]&0xfc)==0x14)) {
-#else
-      if(addr) {
-#endif
-        set_jump_target(link_addr[i][0],(intptr_t)addr);
-        add_link(link_addr[i][1],stub);
-      }
-      else
-#endif
-        set_jump_target(link_addr[i][0],(intptr_t)stub);
+      struct ll_entry *head=add_jump_out(link_addr[i][1],stub,addr);
+      if(addr)
+        add_link(link_addr[i][1],head);
+      emit_extjump(head);
+      set_jump_target(link_addr[i][0],(intptr_t)stub);
     }
     else
     {
@@ -10956,9 +10932,9 @@ int new_recompile_block(int addr)
         ll_remove_matching_addrs(jump_dirty+2048+(expirep&2047),base,shift);
         break;
       case 1:
-        // Clear pointers
-        ll_kill_pointers(jump_out[expirep&2047],base,shift);
-        ll_kill_pointers(jump_out[(expirep&2047)+2048],base,shift);
+        // Clear jump_link
+        ll_kill_link(jump_link+(expirep&2047),base,shift);
+        ll_kill_link(jump_link+2048+(expirep&2047),base,shift);
         break;
       case 2:
         // Clear hash table
@@ -10979,10 +10955,6 @@ int new_recompile_block(int addr)
         break;
       case 3:
         // Clear jump_out
-        #if NEW_DYNAREC >= NEW_DYNAREC_ARM
-        if((expirep&2047)==0) 
-          do_clear_cache();
-        #endif
         ll_remove_matching_addrs(jump_out+(expirep&2047),base,shift);
         ll_remove_matching_addrs(jump_out+2048+(expirep&2047),base,shift);
         break;

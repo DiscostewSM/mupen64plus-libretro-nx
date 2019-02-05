@@ -78,29 +78,6 @@ static void set_jump_target(int addr,int target)
   }
 }
 
-static void *add_pointer(void *src, void* addr)
-{
-  int *ptr=(int*)src;
-  int *ptr2=(int*)((u_int)ptr+(u_int)*ptr+4);
-  assert((*ptr2&0xFF)==0x68);                   //push
-  assert((*(int*)((u_int)ptr2+5)&0xFF)==0x68);  //push
-  //assert((*(int*)((u_int)ptr2+10)&0xFF)==0xE8); //call
-  u_int offset=(u_int)addr-(u_int)ptr-4;
-  *ptr=offset;
-  return (void*)ptr2;
-}
-static void *kill_pointer(void *stub)
-{
-  int *i_ptr=*((int **)((int)stub+6));
-  *i_ptr=(int)stub-(int)i_ptr-4;
-  return i_ptr;
-}
-static int get_pointer(void *stub)
-{
-  int *i_ptr=*((int **)((int)stub+6));
-  return *i_ptr+(int)i_ptr+4;
-}
-
 /* Register allocation */
 
 // Note: registers are allocated clean (unmodified state)
@@ -2615,23 +2592,9 @@ static void emit_cvttpd2dq(u_int ssereg1,u_int ssereg2)
 
 /* Stubs/epilogue */
 
-static void emit_extjump2(int addr, int target, int linker)
+static void emit_extjump2(struct ll_entry * head, intptr_t linker)
 {
-  u_char *ptr=(u_char *)addr;
-  if(*ptr==0x0f)
-  {
-    assert(ptr[1]>=0x80&&ptr[1]<=0x8f);
-    addr+=2;
-  }
-  else
-  {
-    assert(*ptr==0xe8||*ptr==0xe9);
-    addr++;
-  }
-  emit_pushimm(target);
-  emit_pushimm(addr);
-  //assert(addr>=0x7000000&&addr<0x7FFFFFF);
-  //assert((target>=0x80000000&&target<0x80800000)||(target>0xA4000000&&target<0xA4001000));
+  emit_pushimm((int)head);
 //DEBUG >
 #ifdef DEBUG_CYCLE_COUNT
   emit_readword((int)r4300_cp0_next_interrupt(&g_dev.r4300.cp0),ECX);
@@ -2640,7 +2603,7 @@ static void emit_extjump2(int addr, int target, int linker)
 #endif
 //DEBUG <
   emit_call(linker);
-  emit_addimm(ESP,8,ESP);
+  emit_addimm(ESP,4,ESP);
   emit_jmpreg(EAX);
 }
 
